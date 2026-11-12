@@ -16,9 +16,6 @@ import logging
 from enum import Enum
 from typing import Optional, Tuple, List, Callable
 
-import cv2
-import numpy as np
-import mediapipe as mp
 from PyQt6.QtCore import QThread, pyqtSignal
 
 # Input controller imports with fallback
@@ -29,13 +26,19 @@ except Exception as e:
     _pynput_mouse = None
     logging.warning(f"pynput mouse controller fallback: {e}")
 
-try:
-    import pyautogui
-    pyautogui.PAUSE = 0.0
-    pyautogui.FAILSAFE = False
-except Exception as e:
-    pyautogui = None
-    logging.warning(f"pyautogui fallback: {e}")
+_pyautogui = None
+
+def _get_pyautogui():
+    global _pyautogui
+    if _pyautogui is None:
+        try:
+            import pyautogui
+            pyautogui.PAUSE = 0.0
+            pyautogui.FAILSAFE = False
+            _pyautogui = pyautogui
+        except Exception as e:
+            logging.warning(f"pyautogui fallback: {e}")
+    return _pyautogui
 
 logger = logging.getLogger("GestureEngine")
 
@@ -217,14 +220,16 @@ class SmoothScrollController:
             except Exception as e:
                 logger.debug(f"pynput dispatch error: {e}")
 
-        if not dispatched and pyautogui is not None:
-            try:
-                if dy != 0:
-                    pyautogui.scroll(int(dy))
-                if dx != 0 and hasattr(pyautogui, "hscroll"):
-                    pyautogui.hscroll(int(dx))
-            except Exception as e:
-                logger.debug(f"pyautogui dispatch error: {e}")
+        if not dispatched:
+            pag = _get_pyautogui()
+            if pag is not None:
+                try:
+                    if dy != 0:
+                        pag.scroll(int(dy))
+                    if dx != 0 and hasattr(pag, "hscroll"):
+                        pag.hscroll(int(dx))
+                except Exception as e:
+                    logger.debug(f"pyautogui dispatch error: {e}")
 
     def add_pinch_delta(self, delta_x_px: float, delta_y_px: float, dt: float = 0.033):
         """Adds fractional 2D movement deltas into accumulators and charges velocity."""
@@ -480,6 +485,24 @@ class GestureEngine:
         if scroll_dispatcher:
             self.state_machine.scroller.scroll_dispatcher = scroll_dispatcher
 
+        # Lazy vision attributes - loaded only on demand inside background worker thread
+        self.mp = None
+        self.cv2 = None
+        self.mp_hands = None
+        self.hands = None
+        self.mp_draw = None
+        self.mp_draw_styles = None
+        self._vision_initialized = False
+
+    def ensure_vision_initialized(self):
+        """Lazily imports cv2 and mediapipe Hands only when gesture tracking starts."""
+        if self._vision_initialized:
+            return
+        import cv2
+        import mediapipe as mp
+
+        self.cv2 = cv2
+        self.mp = mp
         self.mp_hands = mp.solutions.hands
         self.hands = self.mp_hands.Hands(
             static_image_mode=False,
@@ -490,13 +513,15 @@ class GestureEngine:
         )
         self.mp_draw = mp.solutions.drawing_utils
         self.mp_draw_styles = mp.solutions.drawing_styles
+        self._vision_initialized = True
 
     @property
     def current_state(self) -> GestureState:
         return self.state_machine.current_state
 
-    def process_frame(self, rgb_frame: np.ndarray, current_time: Optional[float] = None) -> Tuple[GestureState, float, float, Optional[list]]:
+    def process_frame(self, rgb_frame, current_time: Optional[float] = None) -> Tuple[GestureState, float, float, Optional[list]]:
         """Processes an image frame from camera."""
+        self.ensure_vision_initialized()
         results = self.hands.process(rgb_frame)
         landmarks = None
         if results.multi_hand_landmarks:
@@ -516,8 +541,10 @@ class GestureEngine:
 
     def close(self):
         """Releases MediaPipe resources."""
-        if hasattr(self, "hands") and self.hands:
+        if self._vision_initialized and self.hands:
             self.hands.close()
+            self.hands = None
+            self._vision_initialized = False
 
 
 class GestureWorkerThread(QThread):
@@ -525,9 +552,9 @@ class GestureWorkerThread(QThread):
     Dedicated worker thread acquiring webcam frames at 30 FPS and ticking 60Hz physics.
     Completely prevents UI thread blocking.
     """
-    state_signal = pyqtSignal(str, str)      # state string (OPEN/PINCHED/PAUSED), hex color
+    state_signal = pyqtSignal(str, str)      # state string (OPEN/PINCHED/PAUSED/LOADING), hex color
     fps_signal = pyqtSignal(float)
-    frame_signal = pyqtSignal(np.ndarray)
+    frame_signal = pyqtSignal(object)
     error_signal = pyqtSignal(str)
 
     def __init__(self, camera_index: int = 0, engine: Optional[GestureEngine] = None):
@@ -535,12 +562,25 @@ class GestureWorkerThread(QThread):
         self.camera_index = camera_index
         self.engine = engine or GestureEngine()
         self._is_running = False
-        self.cap: Optional[cv2.VideoCapture] = None
+        self.cap = None
 
     def run(self):
         self._is_running = True
-        logger.info(f"Opening camera index {self.camera_index}...")
+        logger.info("Initializing vision pipeline in worker thread...")
+        self.state_signal.emit("LOADING", "#FBBF24")
 
+        try:
+            self.engine.ensure_vision_initialized()
+            cv2 = self.engine.cv2
+        except Exception as e:
+            err_msg = f"Failed to initialize vision modules: {e}"
+            logger.exception(err_msg)
+            self.error_signal.emit(err_msg)
+            self.state_signal.emit("OPEN", "#9CA3AF")
+            self._is_running = False
+            return
+
+        logger.info(f"Opening camera index {self.camera_index}...")
         self.cap = cv2.VideoCapture(self.camera_index)
         if not self.cap.isOpened():
             err_msg = f"Unable to open camera index {self.camera_index}."
@@ -553,6 +593,9 @@ class GestureWorkerThread(QThread):
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
+
+        # Vision pipeline initialized and ready
+        self.state_signal.emit("OPEN", "#9CA3AF")
 
         frame_count = 0
         fps_timer = time.time()

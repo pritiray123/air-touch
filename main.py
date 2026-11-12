@@ -35,25 +35,14 @@ def main():
     # Handle Ctrl+C cleanly
     signal.signal(signal.SIGINT, lambda *_: app.quit())
 
-    # Instantiate overlay widget
+    # Instantiate and display floating overlay widget immediately (<1 second startup)
     overlay = OverlayWidget(camera_index=args.camera)
 
     if args.preview:
         overlay._toggle_preview()
 
-    # Position in the top-right corner of the primary screen
-    screen = QGuiApplication.primaryScreen()
-    if screen:
-        screen_geo = screen.availableGeometry()
-        margin = 32
-        x = screen_geo.x() + screen_geo.width() - overlay.width() - margin
-        y = screen_geo.y() + margin
-        overlay.move(x, y)
-    else:
-        overlay.move(100, 100)
-
-    overlay.show()
-    logger.info("Floating overlay widget launched in corner of desktop.")
+    overlay.show_floating()
+    logger.info("Floating overlay widget launched in top-right corner of desktop.")
 
     sys.exit(app.exec())
 

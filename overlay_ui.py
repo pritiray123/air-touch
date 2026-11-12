@@ -8,7 +8,7 @@ import sys
 from typing import Optional
 
 from PyQt6.QtCore import Qt, QPoint, QTimer, pyqtSlot
-from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QBrush
+from PyQt6.QtGui import QImage, QPixmap, QColor, QPainter, QBrush, QGuiApplication
 from PyQt6.QtWidgets import (
     QWidget,
     QVBoxLayout,
@@ -61,15 +61,38 @@ class OverlayWidget(QWidget):
         self.physics_timer.setInterval(16)  # ~60Hz
         self.physics_timer.timeout.connect(self._on_physics_tick)
 
-        # Window configuration: borderless, always-on-top
+        # Window configuration: native topmost borderless floating desktop overlay
         self.setWindowFlags(
-            Qt.WindowType.FramelessWindowHint
+            Qt.WindowType.Window
+            | Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
         )
+        if sys.platform == "darwin":
+            self.setAttribute(Qt.WidgetAttribute.WA_MacAlwaysShowToolWindow, True)
+
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
 
         self._setup_ui()
         self._apply_styles()
+
+    def position_in_top_right(self, margin: int = 24):
+        """Explicitly places the widget in the top-right corner of the primary screen."""
+        self.adjustSize()
+        screen = QGuiApplication.primaryScreen()
+        if screen:
+            screen_geo = screen.availableGeometry()
+            x = screen_geo.x() + screen_geo.width() - self.width() - margin
+            y = screen_geo.y() + margin
+            self.move(x, y)
+        else:
+            self.move(100, 100)
+
+    def show_floating(self):
+        """Ensures floating overlay is positioned, shown, raised, and activated."""
+        self.position_in_top_right(margin=24)
+        self.show()
+        self.raise_()
+        self.activateWindow()
 
     def _setup_ui(self):
         # Outer container frame with dark organic styling
@@ -231,7 +254,7 @@ class OverlayWidget(QWidget):
         #fpsLabel {
             color: #9CA3AF;
             font-size: 10px;
-            font-family: monospace;
+            font-family: Menlo, Monaco, "Courier New", monospace;
             padding-right: 2px;
         }
 
@@ -288,6 +311,11 @@ class OverlayWidget(QWidget):
             border: 1px solid #4ADE80;
         }
         #statusPill[state="PAUSED"] {
+            background-color: #2B2414;
+            color: #FBBF24;
+            border: 1px solid #FBBF24;
+        }
+        #statusPill[state="LOADING"] {
             background-color: #2B2414;
             color: #FBBF24;
             border: 1px solid #FBBF24;
@@ -387,7 +415,9 @@ class OverlayWidget(QWidget):
             return
 
         self.toggle_btn.setEnabled(False)
-        self.toggle_btn.setText("Starting Camera...")
+        self.toggle_btn.setText("Starting Vision...")
+        self._update_pill_ui("LOADING", "#FBBF24")
+        self.action_desc_label.setText("Loading Vision...")
 
         self.worker = GestureWorkerThread(camera_index=self.camera_index, engine=self.engine)
         self.worker.state_signal.connect(self._on_state_update)
@@ -451,6 +481,8 @@ class OverlayWidget(QWidget):
             self.action_desc_label.setText("Pinch Active (Drag to Scroll)")
         elif state_str == "PAUSED":
             self.action_desc_label.setText("Paused (Fist / Palm Held)")
+        elif state_str == "LOADING":
+            self.action_desc_label.setText("Loading Vision...")
         elif state_str == "OPEN":
             self.action_desc_label.setText("Pinch Open (Clutch / Moving Freely)")
         else:
