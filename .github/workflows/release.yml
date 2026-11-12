@@ -1,0 +1,98 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    name: Build Windows Executable
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build Executable with PyInstaller
+        run: |
+          pyinstaller --noconfirm --windowed --onefile --name "GestureScroll-Windows" --collect-all mediapipe --exclude-module matplotlib --exclude-module scipy --exclude-module torch main.py
+
+      - name: Upload Windows Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-asset
+          path: dist/GestureScroll-Windows.exe
+          if-no-files-found: error
+
+  build-macos:
+    name: Build macOS App Bundle
+    runs-on: macos-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build App Bundle with PyInstaller
+        run: |
+          pyinstaller --noconfirm --windowed --onedir --name "GestureScroll" --collect-all mediapipe --exclude-module matplotlib --exclude-module scipy --exclude-module torch main.py
+
+      - name: Inject Camera Permission & Ad-hoc Sign
+        run: |
+          /usr/libexec/PlistBuddy -c "Add :NSCameraUsageDescription string 'GestureScroll requires camera access to track hand gestures for touchless scrolling.'" dist/GestureScroll.app/Contents/Info.plist || /usr/libexec/PlistBuddy -c "Set :NSCameraUsageDescription 'GestureScroll requires camera access to track hand gestures for touchless scrolling.'" dist/GestureScroll.app/Contents/Info.plist
+          codesign --force --deep --sign - dist/GestureScroll.app
+          cd dist && zip -r -y GestureScroll-macOS.zip GestureScroll.app
+
+      - name: Upload macOS Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-asset
+          path: dist/GestureScroll-macOS.zip
+          if-no-files-found: error
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-windows, build-macos]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Attach Assets to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/GestureScroll-Windows.exe
+            dist/GestureScroll-macOS.zip
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+
