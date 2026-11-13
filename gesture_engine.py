@@ -342,6 +342,13 @@ class GestureStateMachine:
             velocity_decay=0.85,
         )
 
+    def set_sensitivity(self, value: float):
+        """Updates sensitivity gain across state machine and scroller in real time."""
+        gain = float(value)
+        self.sensitivity_gain = gain
+        if hasattr(self, "scroller") and self.scroller is not None:
+            self.scroller.sensitivity_gain = gain
+
     def reset_tracking(self):
         """Resets tracking coordinate history."""
         self.x_smoother.reset()
@@ -519,6 +526,18 @@ class GestureEngine:
     def current_state(self) -> GestureState:
         return self.state_machine.current_state
 
+    @property
+    def sensitivity_gain(self) -> float:
+        return self.state_machine.sensitivity_gain
+
+    @sensitivity_gain.setter
+    def sensitivity_gain(self, value: float):
+        self.set_sensitivity(value)
+
+    def set_sensitivity(self, value: float):
+        """Thread-safe update of sensitivity gain across state machine and scroller."""
+        self.state_machine.set_sensitivity(value)
+
     def process_frame(self, rgb_frame, current_time: Optional[float] = None) -> Tuple[GestureState, float, float, Optional[list]]:
         """Processes an image frame from camera."""
         self.ensure_vision_initialized()
@@ -557,12 +576,24 @@ class GestureWorkerThread(QThread):
     frame_signal = pyqtSignal(object)
     error_signal = pyqtSignal(str)
 
-    def __init__(self, camera_index: int = 0, engine: Optional[GestureEngine] = None):
+    def __init__(
+        self,
+        camera_index: int = 0,
+        engine: Optional[GestureEngine] = None,
+        sensitivity_gain: Optional[float] = None,
+    ):
         super().__init__()
         self.camera_index = camera_index
         self.engine = engine or GestureEngine()
+        if sensitivity_gain is not None:
+            self.engine.set_sensitivity(sensitivity_gain)
         self._is_running = False
         self.cap = None
+
+    def set_sensitivity(self, value: float):
+        """Thread-safe sensitivity forwarding to underlying engine."""
+        if self.engine is not None:
+            self.engine.set_sensitivity(value)
 
     def run(self):
         self._is_running = True

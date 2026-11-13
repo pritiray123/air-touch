@@ -208,7 +208,7 @@ class OverlayWidget(QWidget):
         gain_lbl.setObjectName("fieldLabel")
         self.gain_slider = QSlider(Qt.Orientation.Horizontal)
         self.gain_slider.setRange(1500, 7000)
-        self.gain_slider.setValue(int(self.engine.state_machine.scroller.sensitivity_gain))
+        self.gain_slider.setValue(int(self.engine.sensitivity_gain))
         self.gain_slider.valueChanged.connect(self._on_sensitivity_changed)
         gain_row.addWidget(gain_lbl)
         gain_row.addWidget(self.gain_slider)
@@ -395,9 +395,11 @@ class OverlayWidget(QWidget):
         self.settings_frame.setVisible(visible)
         self.adjustSize()
 
-    def _on_sensitivity_changed(self):
-        new_gain = float(self.gain_slider.value())
-        self.engine.state_machine.scroller.sensitivity_gain = new_gain
+    def _on_sensitivity_changed(self, value: int = None):
+        new_gain = float(self.gain_slider.value()) if value is None else float(value)
+        self.engine.set_sensitivity(new_gain)
+        if self.worker is not None:
+            self.worker.set_sensitivity(new_gain)
 
     def _on_physics_tick(self):
         """Called every 16ms by QTimer to deliver smooth momentum glide."""
@@ -419,7 +421,14 @@ class OverlayWidget(QWidget):
         self._update_pill_ui("LOADING", "#FBBF24")
         self.action_desc_label.setText("Loading Vision...")
 
-        self.worker = GestureWorkerThread(camera_index=self.camera_index, engine=self.engine)
+        current_gain = float(self.gain_slider.value())
+        self.engine.set_sensitivity(current_gain)
+        self.worker = GestureWorkerThread(
+            camera_index=self.camera_index,
+            engine=self.engine,
+            sensitivity_gain=current_gain,
+        )
+        self.worker.set_sensitivity(current_gain)
         self.worker.state_signal.connect(self._on_state_update)
         self.worker.fps_signal.connect(self._on_fps_update)
         self.worker.frame_signal.connect(self._on_frame_update)

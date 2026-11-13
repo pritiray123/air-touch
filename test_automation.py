@@ -30,6 +30,8 @@ from gesture_engine import (
     GestureState,
     GestureStateMachine,
     SmoothScrollController,
+    GestureEngine,
+    GestureWorkerThread,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -215,11 +217,11 @@ class MockDocumentViewer(QWidget):
         metrics_layout.addWidget(self.test_phase_label)
 
         self.test_detail_label = QLabel("Awaiting verification loop...")
-        self.test_detail_label.setStyleSheet("color: #9CA3AF; font-size: 10px; font-family: monospace;")
+        self.test_detail_label.setStyleSheet("color: #9CA3AF; font-size: 10px; font-family: Menlo, Monaco, 'Courier New', monospace;")
         metrics_layout.addWidget(self.test_detail_label)
 
         self.scroll_stat_label = QLabel("Scrollbar: 0 px | Displacement: 0 px | State: Initializing")
-        self.scroll_stat_label.setStyleSheet("color: #E5E7EB; font-size: 10px; font-family: monospace;")
+        self.scroll_stat_label.setStyleSheet("color: #E5E7EB; font-size: 10px; font-family: Menlo, Monaco, 'Courier New', monospace;")
         metrics_layout.addWidget(self.scroll_stat_label)
 
         layout.addWidget(self.metrics_card)
@@ -235,7 +237,7 @@ class MockDocumentViewer(QWidget):
                 f"Line {i:03d} | Touchless Screen Scrolling Test Content | Precision Pinch-to-Scroll Viewport Offset..."
             )
             row_label.setStyleSheet(
-                "color: #9CA3AF; font-family: monospace; font-size: 11px; padding: 3px 6px; border-bottom: 1px solid #1F2421;"
+                "color: #9CA3AF; font-family: Menlo, Monaco, 'Courier New', monospace; font-size: 11px; padding: 3px 6px; border-bottom: 1px solid #1F2421;"
             )
             self.content_layout.addWidget(row_label)
 
@@ -519,6 +521,64 @@ def run_pinch_verification_suite():
     assert st_p1 == GestureState.PINCHED, "Hand must immediately engage pinch with zero cooldown delay"
 
     logger.info("✓ Test 3 Passed: Fist-pause isolation and zero cooldown lag verified.")
+
+    # -----------------------------------------------------------------
+    # TEST 4: Live Sensitivity Slider Dynamic Scaling Test (1500 vs 7000)
+    # -----------------------------------------------------------------
+    logger.info("\n--- [TEST 4] Live Sensitivity Dynamic Scaling Test (1500 vs 7000) ---")
+
+    def run_stroke_for_sensitivity(gain_value: float) -> float:
+        """Executes the exact same synthetic pinch-drag stroke at specified sensitivity."""
+        sm = GestureStateMachine(sensitivity_gain=3800.0)
+        # Update sensitivity dynamically via set_sensitivity
+        sm.set_sensitivity(gain_value)
+        dispatched = []
+        sm.scroller.scroll_dispatcher = lambda dx, dy: dispatched.append((dx, dy))
+
+        t = 1000.0
+        # Frame 1 & 2: Settle buffer
+        for _ in range(2):
+            sm.update(make_pinch_hand(pinch_ratio=0.18, offset_y=0.0), current_time=t)
+            t += 0.033
+
+        # Frame 3-7: Upward drag stroke (5 frames)
+        for step in range(1, 6):
+            t += 0.033
+            sm.update(make_pinch_hand(pinch_ratio=0.18, offset_y=-0.035 * step), current_time=t)
+            sm.scroller.tick_60hz()
+
+        # End swipe and allow momentum decay
+        sm.scroller.end_swipe()
+        for _ in range(40):
+            sm.scroller.tick_60hz()
+
+        total_y = sum(d[1] for d in dispatched)
+        return total_y
+
+    disp_1500 = run_stroke_for_sensitivity(1500.0)
+    disp_7000 = run_stroke_for_sensitivity(7000.0)
+    scaling_ratio = disp_7000 / max(1.0, disp_1500)
+
+    logger.info(f"Sensitivity 1500 Total Dispatched: {disp_1500} px")
+    logger.info(f"Sensitivity 7000 Total Dispatched: {disp_7000} px")
+    logger.info(f"Dynamic Scaling Ratio (7000 / 1500): {scaling_ratio:.2f}x (Required >= 3.5x)")
+
+    assert disp_1500 > 0, f"Expected non-zero displacement for 1500 sensitivity, got {disp_1500}"
+    assert disp_7000 > disp_1500, f"7000 sensitivity must be greater than 1500 sensitivity"
+    assert scaling_ratio >= 3.5, f"Expected scaling ratio >= 3.5x, got {scaling_ratio:.2f}x"
+
+    # Verify GestureEngine and GestureWorkerThread set_sensitivity wiring directly
+    engine = GestureEngine(sensitivity_gain=3800.0)
+    assert engine.sensitivity_gain == 3800.0
+    engine.set_sensitivity(5500.0)
+    assert engine.sensitivity_gain == 5500.0
+    assert engine.state_machine.sensitivity_gain == 5500.0
+
+    worker = GestureWorkerThread(camera_index=0, engine=engine)
+    worker.set_sensitivity(6500.0)
+    assert engine.sensitivity_gain == 6500.0
+    assert engine.state_machine.sensitivity_gain == 6500.0
+    logger.info("✓ Test 4 Passed: Live sensitivity dynamic scaling (>=3.5x) and thread/engine wiring verified.")
 
     # Clean up test windows cleanly
     overlay.close()
